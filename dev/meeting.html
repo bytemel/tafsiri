@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Mock meeting</title>
+  <style>
+    body { margin: 0; font: 15px system-ui, sans-serif; background: #202124; color: #e8eaed; height: 100vh; display: flex; flex-direction: column; justify-content: flex-end; }
+    .stage { flex: 1; display: grid; place-items: center; color: #9aa0a6; }
+    .captions { padding: 12px 20px 20px; background: rgba(0,0,0,.6); max-height: 40vh; overflow: hidden; }
+    .turn { display: flex; gap: 10px; margin-top: 10px; }
+    .turn img { width: 32px; height: 32px; border-radius: 50%; }
+    .name { font-weight: 600; font-size: 13px; }
+  </style>
+  <script src="fake-chrome.js"></script>
+</head>
+<body>
+  <div class="stage"><div>Mock meeting (dev only)<br><br><button type="button" onclick="__tafsiriToolbar()">Toolbar button: show or hide Tafsiri</button> <button type="button" id="talk">Start the speakers</button></div></div>
+  <div class="captions" role="region" aria-label="Captions" id="box">
+    <div id="list"></div>
+    <button type="button"><i aria-hidden="true">arrow_downward</i> Jump to bottom</button>
+  </div>
+  <script>
+    // Simulates Meet-style captions: one block per speaker turn inside a wrapper list, text growing
+    // word by word, a live correction, blocks re-rendered mid-sentence, and old blocks dropping off.
+    const avatar = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#5f6368"/></svg>');
+    const script = [
+      ['Wanjiru Kamau', 'Good morning everyone. Thank you for joining the review today. We will start with the budget and then look at the launch plan.'],
+      ['Otieno Achieng', 'Thanks. The budget is ready. We spent less than planned on travel last month.'],
+      ['Wanjiru Kamau', 'Great news. Can you share the numbers in the chat after the meeting?'],
+    ];
+    const box = document.getElementById('list');
+    let i = 0;
+    function speak() {
+      if (i >= script.length) return;
+      const [name, text] = script[i++];
+      const turn = document.createElement('div');
+      turn.className = 'turn';
+      turn.innerHTML = `<img alt="" src="${avatar}"><div><div class="name"></div><div class="text"><span></span></div></div>`;
+      turn.querySelector('.name').textContent = name;
+      box.append(turn);
+      let span = turn.querySelector('span');
+      const words = text.split(' ');
+      let w = 0;
+      let el = turn;
+      const t = setInterval(() => {
+        w++;
+        if (w % 7 === 0) {
+          // Re-render: swap the whole block for a fresh copy, as Meet sometimes does.
+          const copy = el.cloneNode(true);
+          el.replaceWith(copy);
+          el = copy;
+          span = el.querySelector('span');
+        }
+        let shown = words.slice(0, w).join(' ');
+        if (w === 6 && i === 1) shown = shown.replace('joining', 'join in'); // live correction, fixed next tick
+        span.textContent = shown;
+        if (w >= words.length) {
+          clearInterval(t);
+          if (box.querySelectorAll('.turn').length > 2) box.querySelector('.turn').remove();
+          setTimeout(speak, 800);
+        }
+      }, 220);
+    }
+    document.addEventListener('click', (e) => { if (e.target.id === 'talk') speak(); });
+  </script>
+  <script src="../extension/lib/text.js"></script>
+  <script src="../extension/lib/tracker.js"></script>
+  <script src="../extension/captions.js"></script>
+  <script src="../extension/overlay-css.js"></script>
+  <script src="../extension/overlay.js"></script>
+</body>
+</html>

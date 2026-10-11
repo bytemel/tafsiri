@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Tafsiri: live meeting translation",
+  "short_name": "Tafsiri",
+  "version": "0.1.0",
+  "description": "Free live translation of meeting captions in Google Meet, Teams and Zoom on the web, in a floating window you can move, resize or pop out. Translation runs on your computer.",
+  "minimum_chrome_version": "138",
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*",
+    "https://teams.microsoft.com/*",
+    "https://teams.live.com/*",
+    "https://teams.cloud.microsoft/*",
+    "https://*.zoom.us/*",
+    "https://*.zoom.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Tafsiri: show or hide live translation",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Show or hide Tafsiri"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/*",
+        "https://teams.live.com/*",
+        "https://teams.cloud.microsoft/*",
+        "https://*.zoom.us/*",
+        "https://*.zoom.com/*"
+      ],
+      "js": [
+        "lib/text.js",
+        "lib/tracker.js",
+        "captions.js",
+        "overlay-css.js",
+        "overlay.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
