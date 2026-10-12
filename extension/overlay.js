@@ -1,23 +1,31 @@
 // Content script: the floating Tafsiri window on top of the meeting. Drag it by the title bar,
 // resize it from the corner, minimise it, or pop it out into an always-on-top picture-in-picture
-// window. Captions come from captions.js; translation uses Chrome's on-device Translator API.
+// window. Speech comes from the tab's audio (heard by Gemini Nano in the offscreen listener) or from
+// the meeting's captions (captions.js). Translation uses Chrome's on-device Translator API, and
+// Gemini Nano for languages the translator lacks, such as Swahili.
 (() => {
   if (typeof window.__tafsiriOverlayStop === 'function') window.__tafsiriOverlayStop();
 
   const { splitSentences } = globalThis.TafsiriText;
+  const { splitIntoChunks } = globalThis.TafsiriChunks;
   const captions = globalThis.TafsiriCaptions;
   const HOST_ID = 'tafsiri-overlay';
 
-  // Targets Chrome's on-device translator supported when checked on 2026-10-12 (Chrome 154).
-  // Swahili and most African languages were "unavailable" then.
+  // Chrome's on-device translator supported these when checked on 2026-10-12 (Chrome 154).
   const LANGS = ['ar', 'bg', 'bn', 'cs', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', 'he', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'kn', 'ko', 'lt', 'mr', 'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sk', 'sl', 'sv', 'ta', 'te', 'th', 'tr', 'uk', 'vi', 'zh', 'zh-Hant'];
+  // It lacked these; Gemini Nano translates them where the computer has it (quality varies).
+  const NANO_LANGS = ['sw', 'am', 'ha', 'yo', 'ig', 'zu', 'xh', 'so', 'rw', 'lg', 'af', 'fa', 'ur', 'ms', 'fil'];
   const SIZES = [14, 15, 17, 19, 22, 26];
+  const CHUNK_CHARS = 170;
   const MIN_W = 280;
   const MIN_H = 220;
   const names = new Intl.DisplayNames(['en'], { type: 'language' });
   const nameOf = (code) => {
     try { return names.of(code) || code; } catch { return code; }
   };
+
+  // Swahili counts clock hours from sunrise; Nano gets this wrong without a hint.
+  const SWAHILI_TIME = 'Swahili clock time starts at 6: "saa moja asubuhi" is 7 a.m., "saa nne asubuhi" is 10 a.m., "saa sita mchana" is noon, "saa moja jioni" is 7 p.m. Convert such times.';
 
   // ---------- storage ----------
 
@@ -109,6 +117,9 @@
     h('span', { class: 'title', text: 'Tafsiri' }),
     ui.status, ui.pip, ui.min, ui.close);
 
+  ui.modeAudio = h('button', { class: 'seg', type: 'button', 'aria-pressed': 'false', text: 'Hear audio' });
+  ui.modeCaptions = h('button', { class: 'seg', type: 'button', 'aria-pressed': 'false', text: 'Read captions' });
+  ui.mode = h('div', { class: 'modes', role: 'group', 'aria-label': 'Where Tafsiri gets the speech' }, ui.modeAudio, ui.modeCaptions);
   ui.from = h('select', { id: 'tf-from' });
   ui.to = h('select', { id: 'tf-to' });
   ui.swap = h('button', { class: 'swap', type: 'button', 'aria-label': 'Swap languages', title: 'Swap languages' }, icon(ICONS.swap));
@@ -116,6 +127,7 @@
   ui.notice = h('p', { class: 'notice', role: 'alert', hidden: true });
   ui.download = h('button', { class: 'secondary', type: 'button', hidden: true });
   ui.controls = h('div', { class: 'controls' },
+    ui.mode,
     h('div', { class: 'field' }, h('label', { for: 'tf-from', text: 'Spoken language' }), ui.from),
     ui.swap,
     h('div', { class: 'field' }, h('label', { for: 'tf-to', text: 'Translate into' }), ui.to),
@@ -146,14 +158,14 @@
 
   ui.body = h('div', { class: 'body' }, ui.summary, ui.controls, ui.alerts, ui.feed, ui.jump, ui.foot);
   ui.grip = h('div', { class: 'grip', title: 'Drag to resize' });
-  ui.win = h('div', { class: 'win show-original', role: 'dialog', 'aria-label': 'Tafsiri live translation', hidden: true }, ui.bar, ui.body, ui.grip);
+  ui.win = h('div', { class: 'win', role: 'dialog', 'aria-label': 'Tafsiri live translation', hidden: true }, ui.bar, ui.body, ui.grip);
   root.append(ui.win);
   document.documentElement.append(host);
 
   // ---------- state ----------
 
-  const settings = { from: 'auto', to: defaultTarget(), showOriginal: true, size: 17 };
-  const box = { x: null, y: 16, w: 360, h: 460, min: false };
+  const settings = { from: 'auto', to: defaultTarget(), showOriginal: false, size: 17, mode: null };
+  const box = { x: null, y: 16, w: 380, h: 480, min: false };
   let open = false;
   let running = false;
   let showControls = true;
@@ -164,18 +176,35 @@
   const HIDDEN_KEY = `hidden:${location.hostname}`;
   let stopped = false; // set when a newer copy of this script takes over the page
 
-  const turns = new Map(); // caption id -> turn
+  // Gemini Nano, Chrome's on-device model: hears audio and translates languages the translator lacks.
+  const nano = { audio: 'unavailable', text: 'unavailable' };
+  let nanoBase = null;
+  let nanoLoading = null;
+
+  // Audio mode: 'off' | 'starting' | 'listening' | 'waiting-click' | 'error'
+  let audioState = 'off';
+  let audioTurn = null;
+  let audioSeq = 0;
+  let audioGen = 0; // bumped on every start, so news from an older start is ignored
+
+  const turns = new Map(); // id -> turn { id, speaker, text, lang, final, chunks: [] }
   const translators = new Map(); // "src>tgt" -> Promise<Translator>
-  const cache = new Map(); // "src>tgt|sentence" -> translation
+  const engines = new Map(); // "src>tgt" -> Promise<{ kind, tr }>
+  const cache = new Map(); // "src>tgt|text" -> translation
   let detector = null;
   let detectorLoading = null;
   let lastLang = 'en';
   let pendingPair = null;
+  let recentEls = [];
 
   function defaultTarget() {
     const base = (navigator.language || 'en').split('-')[0];
     return LANGS.includes(base) ? base : 'en';
   }
+
+  const mode = () => settings.mode || 'captions';
+  const nanoTextOk = () => nano.text !== 'unavailable';
+  const nanoAudioOk = () => nano.audio !== 'unavailable';
 
   // ---------- geometry ----------
 
@@ -284,7 +313,7 @@
       return;
     }
     try {
-      pipWindow = await documentPictureInPicture.requestWindow({ width: box.w, height: box.min ? 460 : box.h });
+      pipWindow = await documentPictureInPicture.requestWindow({ width: box.w, height: box.min ? 480 : box.h });
     } catch (e) {
       pipWindow = null;
       setNotice(`Could not pop out: ${e.message || e}`);
@@ -318,9 +347,10 @@
   // ---------- settings ----------
 
   function fillSelects() {
-    const sorted = [...LANGS].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
-    ui.from.append(new Option('Auto detect', 'auto'));
-    for (const code of sorted) {
+    const codes = [...LANGS, ...(nanoTextOk() ? NANO_LANGS : [])].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    ui.from.replaceChildren(new Option('Auto detect', 'auto'));
+    ui.to.replaceChildren();
+    for (const code of codes) {
       ui.from.append(new Option(nameOf(code), code));
       ui.to.append(new Option(nameOf(code), code));
     }
@@ -335,8 +365,16 @@
     ui.larger.disabled = settings.size === SIZES[SIZES.length - 1];
     ui.swap.disabled = settings.from === 'auto';
     ui.pair.textContent = `${settings.from === 'auto' ? 'Auto detect' : nameOf(settings.from)} to ${nameOf(settings.to)}`;
+    ui.pair.title = mode() === 'audio' ? 'Hearing audio' : 'Reading captions';
     ui.controls.hidden = running && !showControls;
     ui.summary.hidden = !running || showControls;
+    ui.modeAudio.setAttribute('aria-pressed', String(mode() === 'audio'));
+    ui.modeCaptions.setAttribute('aria-pressed', String(mode() === 'captions'));
+    ui.modeAudio.disabled = !nanoAudioOk();
+    ui.modeAudio.title = nanoAudioOk()
+      ? 'Listen to the meeting sound. No captions needed.'
+      : "Needs Gemini Nano, Chrome's on-device AI, which this computer does not have.";
+    ui.modeCaptions.title = "Read the meeting's own captions. Turn them on in the meeting.";
   }
 
   const saveSettings = () => store.set({ settings: { ...settings } });
@@ -350,12 +388,9 @@
     const key = pairKey(src, tgt);
     if (translators.has(key)) return translators.get(key);
     const p = (async () => {
+      if (!('Translator' in self)) throw Object.assign(new Error('No translator'), { code: 'unsupported' });
       const availability = await Translator.availability({ sourceLanguage: src, targetLanguage: tgt });
-      if (availability === 'unavailable') {
-        const err = new Error(`Chrome can't translate ${nameOf(src)} into ${nameOf(tgt)} on this computer yet.`);
-        err.code = 'unsupported';
-        throw err;
-      }
+      if (availability === 'unavailable') throw Object.assign(new Error('unsupported pair'), { code: 'unsupported' });
       try {
         return await Translator.create({
           sourceLanguage: src,
@@ -370,10 +405,7 @@
       } catch (e) {
         // Chrome only downloads a language pack right after a click.
         if (e && e.name === 'NotAllowedError') {
-          const err = new Error(`Chrome needs one click to download ${nameOf(src)} to ${nameOf(tgt)}.`);
-          err.code = 'needs-click';
-          err.pair = [src, tgt];
-          throw err;
+          throw Object.assign(new Error(`Chrome needs one click to download ${nameOf(src)} to ${nameOf(tgt)}.`), { code: 'needs-click', pair: [src, tgt] });
         }
         throw e;
       }
@@ -384,6 +416,95 @@
       if (e.code !== 'unsupported' && translators.get(key) === p) translators.delete(key);
     });
     return p;
+  }
+
+  // Load Gemini Nano for text. Call inside a click: Chrome may need to download it first.
+  function loadNano() {
+    if (nanoBase) return Promise.resolve(nanoBase);
+    if (nanoLoading) return nanoLoading;
+    if (!nanoTextOk()) return Promise.reject(Object.assign(new Error('no nano'), { code: 'no-nano' }));
+    // Ask for audio input too where the computer supports it: this is also what downloads the
+    // audio part of the model, and it must happen inside the Start click.
+    nanoLoading = LanguageModel.create({
+      ...(nanoAudioOk() ? { expectedInputs: [{ type: 'audio' }, { type: 'text' }] } : {}),
+      temperature: 0.2,
+      topK: 3,
+      monitor(m) {
+        m.addEventListener('downloadprogress', (e) => {
+          const pct = Math.round((e.loaded || 0) * 100);
+          setNotice(pct < 100 ? `Getting Gemini Nano ready (one time): ${pct}%` : '', 'info');
+        });
+      },
+    }).then((s) => {
+      nanoBase = s;
+      nano.text = 'available';
+      if (nanoAudioOk()) nano.audio = 'available';
+      return s;
+    }).finally(() => {
+      nanoLoading = null;
+    });
+    return nanoLoading;
+  }
+
+  async function nanoTranslate(text, src, tgt) {
+    const base = await loadNano();
+    const session = await base.clone();
+    try {
+      const hint = src === 'sw' || tgt === 'sw' ? ` ${SWAHILI_TIME}` : '';
+      const raw = await session.prompt(
+        `Translate the ${nameOf(src)} meeting speech between the markers into ${nameOf(tgt)}. Keep names and numbers. Make it natural.${hint}\n<<<\n${text}\n>>>`,
+        { responseConstraint: { type: 'object', properties: { translation: { type: 'string' } }, required: ['translation'] } },
+      );
+      return (JSON.parse(raw).translation || '').trim();
+    } finally {
+      session.destroy();
+    }
+  }
+
+  // The fastest engine that can do this pair: Chrome's translator, else Gemini Nano.
+  function engineFor(src, tgt) {
+    const key = pairKey(src, tgt);
+    if (engines.has(key)) return engines.get(key);
+    const p = (async () => {
+      try {
+        return { kind: 'translator', tr: await ensureTranslator(src, tgt) };
+      } catch (e) {
+        // A language heard mid-meeting may need a pack download, which needs a click. Keep
+        // translating with Gemini Nano meanwhile and offer the faster download.
+        if (e.code === 'needs-click' && nanoTextOk()) {
+          showDownload(e.pair, `Translating ${nameOf(src)} with Gemini Nano for now. Download the ${nameOf(src)} pack for faster translation.`, 'info');
+          return { kind: 'nano' };
+        }
+        if (e.code !== 'unsupported') throw e;
+      }
+      if (nanoTextOk()) return { kind: 'nano' };
+      throw Object.assign(new Error(`Chrome can't translate ${nameOf(src)} into ${nameOf(tgt)} on this computer.`), { code: 'unsupported' });
+    })();
+    engines.set(key, p);
+    p.catch((e) => {
+      if (e.code !== 'unsupported' && engines.get(key) === p) engines.delete(key);
+    });
+    return p;
+  }
+
+  async function translateText(engine, text, src, tgt) {
+    const key = `${pairKey(src, tgt)}|${text}`;
+    if (cache.has(key)) return cache.get(key);
+    let out;
+    if (engine.kind === 'translator') {
+      const parts = [];
+      for (const s of splitSentences(text)) {
+        const k = `${pairKey(src, tgt)}|${s}`;
+        if (!cache.has(k)) cache.set(k, await engine.tr.translate(s));
+        parts.push(cache.get(k));
+      }
+      out = parts.join(' ');
+    } else {
+      out = await nanoTranslate(text, src, tgt);
+    }
+    if (cache.size > 3000) cache.delete(cache.keys().next().value);
+    cache.set(key, out);
+    return out;
   }
 
   async function detect(text, turn) {
@@ -402,50 +523,67 @@
     return turn.lang || lastLang;
   }
 
-  async function translateTurn(turn) {
-    const ver = ++turn.ver;
-    const text = turn.text;
-    const tgt = settings.to;
-    const auto = settings.from === 'auto';
-    const src = auto ? await detect(text, turn) : settings.from;
-    let out = text;
-    let note = '';
-
-    if (!sameLang(src, tgt)) {
-      try {
-        const tr = await ensureTranslator(src, tgt);
-        const parts = [];
-        for (const s of splitSentences(text)) {
-          const key = `${pairKey(src, tgt)}|${s}`;
-          if (!cache.has(key)) {
-            if (cache.size > 3000) cache.delete(cache.keys().next().value);
-            cache.set(key, await tr.translate(s));
-          }
-          parts.push(cache.get(key));
-        }
-        out = parts.join(' ');
-      } catch (e) {
-        note = e.message || 'Translation failed.';
-        if (e.code === 'needs-click') showDownload(e.pair, e.message);
-      }
-    }
-
-    if (ver < turn.shown) return;
-    turn.shown = ver;
-    turn.translation = out;
-    turn.note = note;
-    turn.srcLabel = auto ? nameOf(src) : '';
-    paint(turn);
+  async function sourceOf(turn) {
+    if (settings.from !== 'auto') return settings.from;
+    if (turn.heardLang) return turn.heardLang; // Gemini Nano already said which language it heard
+    return detect(turn.text, turn);
   }
 
-  function schedule(turn, delay = 250) {
+  // Split the turn into subtitle chunks and translate any chunk whose text changed.
+  async function translateTurn(turn) {
+    syncChunks(turn);
+    paint(turn);
+    const tgt = settings.to;
+    const src = await sourceOf(turn);
+    turn.srcLabel = settings.from === 'auto' ? nameOf(src) : '';
+    if (sameLang(src, tgt)) {
+      for (const c of turn.chunks) {
+        c.translation = c.text;
+        c.done = c.text;
+        c.note = '';
+      }
+      paint(turn);
+      return;
+    }
+    let engine;
+    try {
+      engine = await engineFor(src, tgt);
+    } catch (e) {
+      if (e.code === 'needs-click') showDownload(e.pair, e.message);
+      if (turn.chunks.length) turn.chunks.at(-1).note = e.message || 'Translation failed.';
+      paint(turn);
+      return;
+    }
+    turn.engine = engine.kind;
+    for (const c of [...turn.chunks]) {
+      if (c.done === c.text) continue;
+      const text = c.text;
+      try {
+        const out = await translateText(engine, text, src, tgt);
+        if (c.text === text) {
+          c.translation = out;
+          c.done = text;
+          c.note = '';
+        }
+      } catch (e) {
+        c.note = e.message || 'Translation failed.';
+      }
+      paint(turn);
+    }
+  }
+
+  function schedule(turn, delay) {
+    // Nano is slower, so wait a little longer for the words to settle.
+    const wait = delay ?? (turn.engine === 'nano' ? 900 : 250);
     clearTimeout(turn.timer);
-    turn.timer = setTimeout(() => translateTurn(turn), delay);
+    turn.timer = setTimeout(() => translateTurn(turn), wait);
   }
 
   function retranslateAll() {
+    engines.clear();
     for (const t of turns.values()) {
       t.lang = null;
+      for (const c of t.chunks) c.done = null;
       schedule(t, 0);
     }
   }
@@ -461,34 +599,80 @@
     stuckToBottom = true;
   }
 
+  function newTurn(id, props) {
+    const turn = { id, speaker: '', text: '', lang: null, heardLang: null, final: false, chunks: [], ver: 0, ...props };
+    turns.set(id, turn);
+    return turn;
+  }
+
+  function syncChunks(turn) {
+    const texts = splitIntoChunks(turn.text, CHUNK_CHARS);
+    texts.forEach((t, i) => {
+      const c = turn.chunks[i];
+      if (!c) turn.chunks.push({ text: t, translation: null, done: null, note: '', el: null });
+      else if (c.text !== t) c.text = t;
+    });
+    for (const c of turn.chunks.splice(texts.length)) if (c.el) c.el.remove();
+  }
+
+  function chunkEl() {
+    const el = h('li', { class: 'chunk' },
+      h('div', { class: 'meta' }, h('span', { class: 'who' }), h('span', { class: 'lang' })),
+      h('p', { class: 'tr' }), h('p', { class: 'orig' }), h('p', { class: 'note', hidden: true }));
+    // Tap a line to see the speaker's own words for it.
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+    return el;
+  }
+
   function paint(turn) {
     const stick = nearBottom();
-    if (!turn.el) {
-      turn.el = h('li', { class: 'turn' },
-        h('div', { class: 'meta' }, h('span', { class: 'who' }), h('span', { class: 'lang' })),
-        h('p', { class: 'tr' }), h('p', { class: 'orig' }), h('p', { class: 'note', hidden: true }));
-      ui.turns.append(turn.el);
-      ui.empty.hidden = true;
-      while (ui.turns.children.length > 300) {
-        const old = ui.turns.firstElementChild;
-        for (const [k, t] of turns) if (t.el === old) turns.delete(k);
-        old.remove();
+    if (!turn.chunks.length) syncChunks(turn);
+    turn.chunks.forEach((c, i) => {
+      if (!c.el) {
+        c.el = chunkEl();
+        // Keep a turn's chunks together, in order.
+        const prev = i > 0 ? turn.chunks[i - 1].el : null;
+        if (prev && prev.isConnected) prev.after(c.el);
+        else ui.turns.append(c.el);
+        ui.empty.hidden = true;
       }
-    }
-    const [meta, tr, orig, note] = turn.el.children;
-    const [who, lang] = meta.children;
-    who.textContent = turn.speaker || '';
-    lang.textContent = turn.srcLabel ? `${turn.speaker ? ' · ' : ''}from ${turn.srcLabel}` : '';
-    meta.hidden = !turn.speaker && !turn.srcLabel;
-    tr.textContent = turn.translation ?? turn.text;
-    tr.classList.toggle('pending', turn.translation == null);
-    orig.textContent = turn.text;
-    orig.hidden = turn.translation == null || turn.translation === turn.text;
-    note.textContent = turn.note || '';
-    note.hidden = !turn.note;
-    turn.el.classList.toggle('live', !turn.final);
+      const [meta, tr, orig, note] = c.el.children;
+      const [who, lang] = meta.children;
+      const first = i === 0;
+      who.textContent = first ? turn.speaker || '' : '';
+      lang.textContent = first && turn.srcLabel ? `${turn.speaker ? ' · ' : ''}${turn.srcLabel}` : '';
+      meta.hidden = !first || (!turn.speaker && !turn.srcLabel);
+      tr.textContent = c.translation ?? c.text;
+      tr.classList.toggle('pending', c.translation == null);
+      orig.textContent = c.text;
+      orig.hidden = c.translation == null || c.translation === c.text;
+      note.textContent = c.note || '';
+      note.hidden = !c.note;
+      c.el.classList.toggle('live', !turn.final && i === turn.chunks.length - 1);
+    });
+    trimFeed();
+    markRecent();
     if (stick) toBottom();
     else ui.jump.hidden = false;
+  }
+
+  // Only the newest lines are big; older ones step back so the current speech stands out.
+  function markRecent() {
+    const latest = [...ui.turns.children].slice(-2);
+    for (const el of recentEls) if (!latest.includes(el)) el.classList.remove('recent');
+    for (const el of latest) el.classList.add('recent');
+    recentEls = latest;
+  }
+
+  function trimFeed() {
+    while (ui.turns.children.length > 400) {
+      const old = ui.turns.firstElementChild;
+      for (const [k, t] of turns) {
+        t.chunks = t.chunks.filter((c) => c.el !== old);
+        if (!t.chunks.length) turns.delete(k);
+      }
+      old.remove();
+    }
   }
 
   function setNotice(text, kind = 'warn') {
@@ -497,38 +681,65 @@
     ui.notice.classList.toggle('info', kind === 'info');
   }
 
-  function showDownload(pair, message) {
+  function showDownload(pair, message, kind = 'warn') {
     pendingPair = pair;
-    setNotice(message);
+    setNotice(message, kind);
     ui.download.textContent = `Download ${nameOf(pair[0])} to ${nameOf(pair[1])}`;
     ui.download.hidden = false;
   }
 
   function renderStatus() {
-    const { state, platform } = readerStatus;
-    const live = state === 'listening';
-    ui.status.classList.toggle('live', live && running);
-    ui.status.classList.toggle('warn', !live);
-    ui.status.textContent = live ? (running ? 'Live' : 'Captions found') : 'Captions are off';
-
-    const steps = live
-      ? (running ? [] : ['Pick your languages and press Start translating.'])
-      : captions.known
-        ? [`Turn on captions in ${platform}: the CC button at the bottom of the call.`, 'Pick your languages and press Start translating.']
-        : ['Join the meeting in Chrome: Google Meet, or Teams and Zoom on the web.', "Turn on the meeting's captions (the CC button).", 'Pick your languages and press Start translating.'];
-    ui.emptyTitle.textContent = live && running ? 'Waiting for someone to speak' : 'Live captions, translated';
+    let text;
+    let tone;
+    let title;
+    let steps;
+    if (mode() === 'audio') {
+      const map = {
+        listening: ['Listening', 'live'],
+        starting: ['Starting', ''],
+        'waiting-click': ['Needs one click', 'warn'],
+        error: ['Not listening', 'warn'],
+        off: [running ? 'Not listening' : 'Ready', running ? 'warn' : ''],
+      };
+      [text, tone] = map[audioState] || map.off;
+      if (audioState === 'waiting-click') {
+        title = 'One click to let Tafsiri hear this tab';
+        steps = ["Click the Tafsiri icon in Chrome's toolbar (pin it from the puzzle-piece menu), or press Alt+Shift+T."];
+      } else if (audioState === 'listening') {
+        title = 'Listening';
+        steps = ['Translations appear a few seconds after someone speaks.'];
+      } else {
+        title = 'Hear the meeting, translated';
+        steps = ['Pick your languages and press Start translating.', 'Tafsiri listens to this tab, so captions are not needed.'];
+      }
+    } else {
+      const { state, platform } = readerStatus;
+      const live = state === 'listening';
+      text = live ? (running ? 'Live' : 'Captions found') : 'Captions are off';
+      tone = live ? (running ? 'live' : '') : 'warn';
+      title = live && running ? 'Waiting for someone to speak' : 'Live captions, translated';
+      steps = live
+        ? (running ? [] : ['Pick your languages and press Start translating.'])
+        : captions.known
+          ? [`Turn on captions in ${platform}: the CC button at the bottom of the call.`, 'Pick your languages and press Start translating.']
+          : ['Join the meeting in Chrome: Google Meet, or Teams and Zoom on the web.', "Turn on the meeting's captions (the CC button).", 'Pick your languages and press Start translating.'];
+    }
+    ui.status.textContent = text;
+    ui.status.classList.toggle('live', tone === 'live');
+    ui.status.classList.toggle('warn', tone === 'warn');
+    ui.emptyTitle.textContent = title;
     // One step reads better as a sentence than as a numbered list.
     ui.emptySteps.replaceChildren(...steps.map((s) => h('li', { text: s })));
     ui.emptySteps.classList.toggle('single', steps.length === 1);
     ui.emptySteps.hidden = steps.length === 0;
   }
 
-  // Warn about a pair Chrome cannot translate before the user presses Start.
+  // Warn about a pair nothing on this computer can translate, before the user presses Start.
   let pairCheck = 0;
   async function checkPair() {
     const gen = ++pairCheck;
     ui.download.hidden = true;
-    if (!('Translator' in self)) {
+    if (!('Translator' in self) && !nanoTextOk()) {
       setNotice('Tafsiri needs Chrome 138 or newer on a desktop computer.');
       ui.start.disabled = true;
       return;
@@ -540,15 +751,17 @@
     }
     let a = 'unavailable';
     try {
-      a = await Translator.availability({ sourceLanguage: settings.from, targetLanguage: settings.to });
+      if ('Translator' in self) a = await Translator.availability({ sourceLanguage: settings.from, targetLanguage: settings.to });
     } catch {}
     if (gen !== pairCheck) return; // the user picked another pair meanwhile
-    const ok = a !== 'unavailable';
+    const ok = a !== 'unavailable' || nanoTextOk();
     ui.start.disabled = !ok;
-    setNotice(ok ? '' : `Chrome can't translate ${nameOf(settings.from)} into ${nameOf(settings.to)} on this computer yet. Pick another pair.`);
+    if (!ok) setNotice(`Chrome can't translate ${nameOf(settings.from)} into ${nameOf(settings.to)} on this computer. Pick another pair.`);
+    else if (a === 'unavailable') setNotice(`Gemini Nano translates ${nameOf(settings.from)} to ${nameOf(settings.to)}. It is a little slower and quality varies.`, 'info');
+    else setNotice('');
   }
 
-  // ---------- captions in ----------
+  // ---------- speech in: captions ----------
 
   function onCaption(msg) {
     if (msg.type === 'status') {
@@ -556,26 +769,18 @@
       renderStatus();
       return;
     }
-    if (!running) return;
+    if (!running || mode() !== 'captions') return;
+    const id = `c${msg.id}`;
     if (msg.type === 'caption') {
-      let turn = turns.get(msg.id);
-      if (!turn) {
-        turn = { ver: 0, shown: 0, final: false };
-        turns.set(msg.id, turn);
-      }
+      const turn = turns.get(id) || newTurn(id);
       turn.speaker = msg.speaker;
       turn.text = msg.text;
       turn.final = false;
       paint(turn);
       schedule(turn);
-      // Meetings leave the last lines on screen; drop the live marker once the speaker pauses.
-      clearTimeout(turn.quiet);
-      turn.quiet = setTimeout(() => {
-        turn.final = true;
-        paint(turn);
-      }, 2500);
+      quietLater(turn);
     } else if (msg.type === 'final') {
-      const turn = turns.get(msg.id);
+      const turn = turns.get(id);
       if (turn) {
         turn.final = true;
         schedule(turn, 0);
@@ -583,83 +788,219 @@
     }
   }
 
+  // Meetings leave the last lines on screen; drop the live marker once the speaker pauses.
+  function quietLater(turn) {
+    clearTimeout(turn.quiet);
+    turn.quiet = setTimeout(() => {
+      turn.final = true;
+      paint(turn);
+    }, 2500);
+  }
+
+  // ---------- speech in: audio ----------
+
+  // Lines heard close together, in the same language, read as one turn.
+  const stale = (msg) => msg.gen != null && msg.gen !== audioGen;
+
+  function onAudioLine(line) {
+    if (!running || mode() !== 'audio' || stale(line)) return;
+    const lang = line.lang || null;
+    // The listener already translated this line: show it as it is, one line per block.
+    if (line.translation != null) {
+      const turn = newTurn(`a${++audioSeq}`, { heardLang: lang, text: line.text });
+      const same = lang && sameLang(lang, settings.to);
+      turn.chunks = [{ text: line.text, translation: same || !line.translation ? line.text : line.translation, done: line.text, note: '', el: null }];
+      turn.srcLabel = settings.from === 'auto' && lang ? nameOf(lang) : '';
+      turn.endMs = line.endMs;
+      audioTurn = turn;
+      paint(turn);
+      quietLater(turn);
+      return;
+    }
+    const joins = audioTurn && turns.has(audioTurn.id) && line.startMs - audioTurn.endMs < 1500 && audioTurn.heardLang === lang && audioTurn.text.length < 700;
+    if (joins) {
+      // A sentence cut in two by a pause: "the launch" + "Plan for..." reads "the launch plan for...".
+      const midSentence = !/[.!?\u3002\uff01\uff1f]$/.test(audioTurn.text);
+      const next = midSentence && /^[A-Z][a-z]/.test(line.text) ? line.text[0].toLowerCase() + line.text.slice(1) : line.text;
+      audioTurn.text = `${audioTurn.text} ${next}`;
+    } else {
+      audioTurn = newTurn(`a${++audioSeq}`, { heardLang: lang });
+      audioTurn.text = line.text;
+    }
+    audioTurn.endMs = line.endMs;
+    audioTurn.final = false;
+    paint(audioTurn);
+    schedule(audioTurn, 0);
+    quietLater(audioTurn);
+  }
+
+  function onAudioState(msg) {
+    if (stale(msg)) return;
+    if (msg.state === 'listening') {
+      if (!running || mode() !== 'audio') return;
+      audioState = 'listening';
+      setNotice('');
+    } else if (msg.state === 'warn') {
+      setNotice(msg.message, 'info');
+      return;
+    } else if (msg.state === 'stopped') {
+      const was = running && mode() === 'audio';
+      audioState = 'off';
+      if (was) {
+        setNotice(msg.message || 'Tafsiri stopped listening.', 'info');
+        pause({ keepAudio: true });
+      }
+    } else if (msg.state === 'error') {
+      audioState = msg.code === 'needs-click' ? 'waiting-click' : 'error';
+      if (msg.code === 'needs-click') setNotice('Chrome needs one click on the Tafsiri icon before it lets Tafsiri hear this tab. Click it in the toolbar, or press Alt+Shift+T.', 'info');
+      else if (msg.code === 'no-nano') {
+        nano.audio = 'unavailable';
+        setNotice("Gemini Nano is not available on this computer, so Tafsiri can't hear audio here. Switched to reading captions.");
+        setMode('captions');
+      } else if (msg.code === 'nano-not-ready') setNotice('Gemini Nano is still getting ready on this computer. Try again in a few minutes, or read captions for now.');
+      else setNotice(`Could not hear this tab: ${msg.message || 'unknown error'}`);
+    }
+    renderStatus();
+  }
+
+  // For targets Chrome's translator lacks, the listener translates while it transcribes.
+  const listenerTranslates = () => NANO_LANGS.includes(settings.to);
+  const audioOptions = () => ({
+    spokenHint: settings.from === 'auto' ? '' : nameOf(settings.from),
+    translateTo: listenerTranslates() ? nameOf(settings.to) : '',
+  });
+
+  async function requestAudio() {
+    audioState = 'starting';
+    renderStatus();
+    const gen = ++audioGen;
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({ type: 'audio-start', gen, ...audioOptions() });
+    } catch (e) {
+      res = { ok: false, code: 'error', message: e.message };
+    }
+    if (!running || mode() !== 'audio' || gen !== audioGen) return;
+    if (!res || !res.ok) onAudioState({ state: 'error', gen, code: res && res.code, message: res && res.message });
+  }
+
+  function stopAudio() {
+    if (audioState === 'off') return;
+    audioState = 'off';
+    audioGen++; // anything still on its way from this listener is now stale
+    try {
+      chrome.runtime.sendMessage({ type: 'audio-stop' }).catch(() => {});
+    } catch {}
+  }
+
   // ---------- start / pause ----------
 
-  // Start right away; language packs download in the background with progress in the notice.
+  // Start right away; models and language packs download in the background with progress shown.
   function start() {
-    if (!('Translator' in self)) return;
+    if (!('Translator' in self) && !nanoTextOk()) return;
     setNotice('');
     ui.download.hidden = true;
     running = true;
     showControls = false;
     applyView();
-    renderStatus();
+    prepareEngines();
 
-    // Begin these inside the click so Chrome allows any download.
-    if (settings.from === 'auto') {
-      if (!detector && !detectorLoading) {
-        detectorLoading = ('LanguageDetector' in self
-          ? LanguageDetector.create({
-              monitor(m) {
-                m.addEventListener('downloadprogress', (e) => {
-                  const pct = Math.round((e.loaded || 0) * 100);
-                  setNotice(pct < 100 ? `Getting auto detect ready: ${pct}%. Treating speech as English until then.` : '', 'info');
-                });
-              },
-            })
-          : Promise.reject(new Error('no detector')))
-          .then((d) => {
-            detector = d;
-            retranslateAll();
-          })
-          .catch(() => setNotice('Auto detect is not available right now, so speech is treated as English. Pick the spoken language to be sure.'))
-          .finally(() => (detectorLoading = null));
-      }
-      if (!sameLang('en', settings.to)) warm('en', settings.to);
-    } else if (!sameLang(settings.from, settings.to)) {
-      warm(settings.from, settings.to);
-    }
-    // Pick up whatever is already on screen.
-    if (unsubscribe) {
+    if (mode() === 'audio') {
+      // Gemini Nano must be ready before the listener can use it.
+      const go = () => running && mode() === 'audio' && requestAudio();
+      if (nano.audio === 'available') go();
+      else loadNano().then(go, () => onAudioState({ state: 'error', gen: audioGen, code: 'nano-not-ready' }));
+    } else if (unsubscribe) {
+      // Pick up whatever is already on screen.
       unsubscribe();
       unsubscribe = captions.subscribe(onCaption);
     }
+    renderStatus();
+  }
+
+  // Load what this language choice needs. Call inside a click: Chrome may need to download it.
+  function prepareEngines() {
+    const needNano = mode() === 'audio' || NANO_LANGS.includes(settings.to) || NANO_LANGS.includes(settings.from);
+    if (nanoTextOk() && (nano.text === 'available' || needNano)) loadNano().catch(() => {});
+
+    if (mode() === 'captions' && settings.from === 'auto' && !detector && !detectorLoading) {
+      detectorLoading = ('LanguageDetector' in self
+        ? LanguageDetector.create({
+            monitor(m) {
+              m.addEventListener('downloadprogress', (e) => {
+                const pct = Math.round((e.loaded || 0) * 100);
+                setNotice(pct < 100 ? `Getting auto detect ready: ${pct}%. Treating speech as English until then.` : '', 'info');
+              });
+            },
+          })
+        : Promise.reject(new Error('no detector')))
+        .then((d) => {
+          detector = d;
+          retranslateAll();
+        })
+        .catch(() => setNotice('Auto detect is not available right now, so speech is treated as English. Pick the spoken language to be sure.'))
+        .finally(() => (detectorLoading = null));
+    }
+    const src = settings.from === 'auto' ? 'en' : settings.from;
+    if (!sameLang(src, settings.to)) warm(src, settings.to);
   }
 
   function warm(src, tgt) {
-    ensureTranslator(src, tgt).catch((e) => {
+    engineFor(src, tgt).catch((e) => {
       if (e.code === 'needs-click') showDownload(e.pair, e.message);
       else setNotice(e.message || 'Could not start translating.');
       if (e.code === 'unsupported' && settings.from !== 'auto') pause();
     });
   }
 
-  function pause() {
+  function pause({ keepAudio } = {}) {
     running = false;
     showControls = true;
+    if (!keepAudio) stopAudio();
     applyView();
     renderStatus();
+  }
+
+  function setMode(m) {
+    if (m === 'audio' && !nanoAudioOk()) return;
+    const wasRunning = running;
+    if (wasRunning) pause();
+    settings.mode = m;
+    audioTurn = null;
+    saveSettings();
+    applyView();
+    renderStatus();
+    if (wasRunning) start();
   }
 
   async function languagesChanged() {
     applyView();
     saveSettings();
     await checkPair();
-    if (running) {
+    if (!running) return;
+    if (mode() === 'audio' && audioState !== 'off' && audioState !== 'error') {
+      // Keep hearing the tab; just tell the listener about the new languages.
+      prepareEngines();
+      try {
+        chrome.runtime.sendMessage({ type: 'audio-update', ...audioOptions() }).catch(() => {});
+      } catch {}
+    } else {
       start();
-      retranslateAll();
     }
+    retranslateAll();
   }
 
   // ---------- wiring ----------
 
   ui.start.addEventListener('click', start);
-  ui.pause.addEventListener('click', pause);
+  ui.pause.addEventListener('click', () => pause());
   ui.change.addEventListener('click', () => {
     showControls = true;
     applyView();
     ui.from.focus();
   });
+  ui.modeAudio.addEventListener('click', () => setMode('audio'));
+  ui.modeCaptions.addEventListener('click', () => setMode('captions'));
   ui.pip.addEventListener('click', popOut);
   ui.min.addEventListener('click', toggleMin);
   ui.close.addEventListener('click', () => {
@@ -672,6 +1013,7 @@
     const [src, tgt] = pendingPair;
     ui.download.hidden = true;
     translators.delete(pairKey(src, tgt));
+    engines.delete(pairKey(src, tgt));
     try {
       await ensureTranslator(src, tgt);
       setNotice('');
@@ -714,11 +1056,11 @@
 
   ui.copy.addEventListener('click', async () => {
     const lines = [...turns.values()]
-      .filter((t) => t.el && t.el.isConnected)
+      .filter((t) => t.chunks.some((c) => c.el && c.el.isConnected))
       .map((t) => {
-        const said = t.translation ?? t.text;
+        const said = t.chunks.map((c) => c.translation ?? c.text).join(' ');
         const line = t.speaker ? `${t.speaker}: ${said}` : said;
-        return settings.showOriginal && t.translation && t.translation !== t.text ? `${line}\n  (${t.text})` : line;
+        return settings.showOriginal && said !== t.text ? `${line}\n  (${t.text})` : line;
       });
     try {
       // While popped out, the picture-in-picture window has focus, not the meeting page.
@@ -732,6 +1074,8 @@
 
   ui.clear.addEventListener('click', () => {
     turns.clear();
+    audioTurn = null;
+    recentEls = [];
     ui.turns.textContent = '';
     ui.empty.hidden = false;
     ui.jump.hidden = true;
@@ -748,22 +1092,35 @@
     ui.win.addEventListener(type, (e) => e.stopPropagation());
   }
 
-  function onMessage(msg) {
+  function onMessage(msg, _sender, sendResponse) {
     if (!msg) return;
-    // Toolbar icon: expand a minimised bar, hide an open window, show a hidden one.
-    if (msg.type === 'toggle') {
+    if (msg.type === 'audio-line') return onAudioLine(msg);
+    if (msg.type === 'audio-state') return onAudioState(msg);
+    if (msg.type === 'open') return show({ minimised: false });
+    // Toolbar icon. If Tafsiri was waiting for this click to hear the tab, open and listen.
+    // Otherwise: expand a minimised bar, hide an open window, show a hidden one.
+    if (msg.type === 'icon' || msg.type === 'toggle') {
+      const wantAudio = running && mode() === 'audio' && audioState !== 'listening' && audioState !== 'starting';
+      if (wantAudio) {
+        show({ minimised: false });
+        audioState = 'starting';
+        renderStatus();
+        sendResponse({ wantAudio: true, gen: ++audioGen, ...audioOptions() });
+        return;
+      }
       if (pipWindow) {
         hide();
         pipWindow.close();
       } else if (open && !box.min) hide();
       else show({ minimised: false });
+      sendResponse({ wantAudio: false });
     }
-    if (msg.type === 'open') show({ minimised: false });
   }
   chrome.runtime.onMessage.addListener(onMessage);
 
   window.__tafsiriOverlayStop = () => {
     stopped = true;
+    if (running) stopAudio();
     running = false;
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     window.removeEventListener('resize', onResize);
@@ -775,11 +1132,21 @@
 
   // ---------- boot ----------
 
-  fillSelects();
-  store.get(['settings', 'box', HIDDEN_KEY]).then((saved) => {
+  async function probeNano() {
+    if (!('LanguageModel' in self)) return;
+    try {
+      nano.text = await LanguageModel.availability();
+      nano.audio = await LanguageModel.availability({ expectedInputs: [{ type: 'audio' }] });
+    } catch {}
+  }
+
+  Promise.all([store.get(['settings', 'box', HIDDEN_KEY]), probeNano()]).then(([saved]) => {
     if (stopped) return;
     Object.assign(settings, saved.settings || {});
     Object.assign(box, saved.box || {});
+    // Hearing audio is the default wherever Gemini Nano can do it.
+    if (!settings.mode || (settings.mode === 'audio' && !nanoAudioOk())) settings.mode = nanoAudioOk() ? 'audio' : 'captions';
+    fillSelects();
     ui.from.value = settings.from;
     ui.to.value = settings.to;
     if (!ui.to.value) ui.to.value = settings.to = 'en';

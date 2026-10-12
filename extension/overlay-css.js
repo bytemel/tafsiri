@@ -117,6 +117,24 @@ globalThis.TafsiriCSS = `
   border-bottom: 1px solid var(--line);
 }
 
+.modes {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 10px;
+  background: var(--line);
+}
+.seg {
+  min-height: 30px !important;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600 !important;
+}
+.seg[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(9 9 11 / 0.12); }
+
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field label { font-size: 12px; color: var(--muted); }
 
@@ -198,16 +216,36 @@ globalThis.TafsiriCSS = `
 .empty p { margin: 0; font-size: 12.5px; }
 
 .turns { list-style: none; margin: 0; padding: 0; }
-.turn { padding: 9px 0 9px 10px; border-left: 3px solid transparent; }
-.turn + .turn { border-top: 1px solid var(--line); }
-.turn.live { border-left-color: var(--accent); }
+
+/* Subtitle view: one short chunk per line. The newest two are full size; older ones step back. */
+.chunk { padding: 6px 0 6px 10px; border-left: 3px solid transparent; cursor: default; }
+.chunk .meta:not([hidden]) { margin-top: 8px; }
+.chunk:first-child .meta { margin-top: 0; }
+.chunk.live { border-left-color: var(--accent); }
 .meta { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
 .meta .lang { font-weight: 400; }
-.tr { margin: 0; font-size: var(--tr-size); line-height: 1.4; overflow-wrap: anywhere; }
-.tr.pending { color: var(--muted); }
-.orig { margin: 3px 0 0; font-size: max(12px, calc(var(--tr-size) - 4px)); color: var(--muted); overflow-wrap: anywhere; }
+.tr {
+  margin: 0;
+  font-size: calc(var(--tr-size) * 0.82);
+  line-height: 1.4;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.chunk.recent .tr { font-size: var(--tr-size); color: var(--text); font-weight: 500; }
+.tr.pending, .chunk.recent .tr.pending { color: var(--muted); font-weight: 400; font-style: italic; }
+.orig {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.chunk.expanded .orig { display: block; -webkit-line-clamp: unset; }
 .note { margin: 3px 0 0; font-size: 12px; color: var(--warn); }
-.win:not(.show-original) .orig { display: none; }
+.win:not(.show-original) .chunk:not(.expanded) .orig { display: none; }
 
 .jump {
   position: absolute;

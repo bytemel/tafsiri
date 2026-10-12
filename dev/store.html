@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Tafsiri store screenshots</title>
+  <style>
+    /* Dev only: a neutral video-call backdrop for Chrome Web Store screenshots. It copies no real
+       meeting product's look. Open with ?shot=1 (subtitles) or ?shot=2 (setup). */
+    html, body { margin: 0; height: 100%; background: #17181b; font: 15px system-ui, sans-serif; color: #e7e7ea; overflow: hidden; }
+    .grid { position: absolute; inset: 24px 24px 96px 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .tile { position: relative; border-radius: 14px; background: #24262b; display: grid; place-items: center; }
+    .tile b { width: 92px; height: 92px; border-radius: 50%; display: grid; place-items: center; font-size: 34px; font-weight: 600; color: #fff; }
+    .tile span { position: absolute; left: 14px; bottom: 12px; font-size: 13px; color: #c9cad0; }
+    .dock { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; gap: 12px; }
+    .dock i { width: 48px; height: 48px; border-radius: 50%; background: #2c2e34; display: block; }
+    .dock i.end { background: #b4473b; width: 64px; border-radius: 24px; }
+  </style>
+  <script src="fake-chrome.js"></script>
+</head>
+<body>
+  <div class="grid">
+    <div class="tile"><b style="background:#3b6e8f">AW</b><span>Amina Wekesa</span></div>
+    <div class="tile"><b style="background:#7a5c3a">JM</b><span>Jean Mbeki</span></div>
+    <div class="tile"><b style="background:#4f6b45">KO</b><span>Kofi Owusu</span></div>
+    <div class="tile"><b style="background:#6b4f7a">SL</b><span>Sara Lindqvist</span></div>
+  </div>
+  <div class="dock"><i></i><i></i><i></i><i class="end"></i></div>
+  <script>
+    // Pretend Gemini Nano exists so the audio mode shows as it does on a supported computer.
+    if (!('LanguageModel' in self)) self.LanguageModel = { availability: async () => 'available', create: async () => ({ clone: async () => ({ prompt: async () => '{}', destroy() {} }), destroy() {} }) };
+    window.__devAudioStart = async () => ({ ok: true });
+    window.__devAudioStop = () => {};
+  </script>
+  <script src="../extension/lib/text.js"></script>
+  <script src="../extension/lib/tracker.js"></script>
+  <script src="../extension/lib/chunks.js"></script>
+  <script src="../extension/captions.js"></script>
+  <script src="../extension/overlay-css.js"></script>
+  <script src="../extension/overlay.js"></script>
+  <script>
+    // Example lines in the shape the listener sends. They show the real overlay, with sample speech.
+    const LINES = [
+      { lang: 'sw', text: 'Habari za asubuhi. Tuanze na bajeti ya mwezi huu.', translation: 'Good morning. Let us start with this month\'s budget.' },
+      { lang: 'fr', text: 'Merci. Nous avons dépensé moins que prévu pour les déplacements.', translation: 'Thank you. We spent less than planned on travel.' },
+      { lang: 'en', text: 'Great. Can you share the numbers in the chat after the call?', translation: 'Great. Can you share the numbers in the chat after the call?' },
+      { lang: 'sw', text: 'Ndiyo, nitazituma saa nne asubuhi kesho.', translation: 'Yes, I will send them at 10 a.m. tomorrow.' },
+    ];
+    window.__stage = async (shot) => {
+      await __tafsiriToolbar();
+      await new Promise((r) => setTimeout(r, 400));
+      const s = document.getElementById('tafsiri-overlay').shadowRoot;
+      const to = s.getElementById('tf-to');
+      to.value = 'en';
+      to.dispatchEvent(new Event('change'));
+      if (shot === 2) return 'setup';
+      s.querySelector('.primary').click();
+      await new Promise((r) => setTimeout(r, 300));
+      __tafsiriDispatch({ type: 'audio-state', state: 'listening' });
+      let t = 1000;
+      for (const l of LINES) {
+        __tafsiriDispatch({ type: 'audio-line', seg: t, startMs: t, endMs: t + 3000, ...l });
+        t += 6000;
+      }
+      return 'subtitles';
+    };
+  </script>
+</body>
+</html>

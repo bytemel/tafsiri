@@ -14,7 +14,7 @@
   <script src="fake-chrome.js"></script>
 </head>
 <body>
-  <div class="stage"><div>Mock meeting (dev only)<br><br><button type="button" onclick="__tafsiriToolbar()">Toolbar button: show or hide Tafsiri</button> <button type="button" id="talk">Start the speakers</button></div></div>
+  <div class="stage"><div>Mock meeting (dev only)<br><br><button type="button" onclick="__tafsiriToolbar()">Toolbar button</button> <button type="button" id="talk">Start the caption speakers</button></div></div>
   <div class="captions" role="region" aria-label="Captions" id="box">
     <div id="list"></div>
     <button type="button"><i aria-hidden="true">arrow_downward</i> Jump to bottom</button>
@@ -63,8 +63,39 @@
     }
     document.addEventListener('click', (e) => { if (e.target.id === 'talk') speak(); });
   </script>
+  <script>
+    // Audio mode, dev only: play the test clip into the real listener without using the speakers.
+    let devListener = null;
+    window.__devAudioStart = async (msg, dispatch) => {
+      const ctx = new AudioContext();
+      const buf = await ctx.decodeAudioData(await (await fetch('local/meeting.wav')).arrayBuffer());
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const dest = ctx.createMediaStreamDestination();
+      src.connect(dest);
+      src.start();
+      src.onended = () => setTimeout(() => devListener && devListener.stop('The test clip ended.'), 20000);
+      try {
+        devListener = await TafsiriListener.startListening(dest.stream, {
+          workletUrl: '../extension/audio-worklet.js',
+          spokenHint: msg.spokenHint,
+          translateTo: msg.translateTo,
+          playback: false,
+          onLine: (line) => dispatch({ type: 'audio-line', ...line }),
+          onState: (s) => dispatch({ type: 'audio-state', ...s }),
+        });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, code: e.code || 'error', message: e.message };
+      }
+    };
+    window.__devAudioStop = () => devListener && devListener.stop();
+  </script>
+  <script src="../extension/lib/segmenter.js"></script>
+  <script src="../extension/lib/listener.js"></script>
   <script src="../extension/lib/text.js"></script>
   <script src="../extension/lib/tracker.js"></script>
+  <script src="../extension/lib/chunks.js"></script>
   <script src="../extension/captions.js"></script>
   <script src="../extension/overlay-css.js"></script>
   <script src="../extension/overlay.js"></script>
