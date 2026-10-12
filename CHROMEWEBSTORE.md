@@ -104,7 +104,7 @@ extension's code. Recommended dashboard answers: tick no data types, and tick al
 
 ## Privacy Policy
 
-**Privacy Policy URL**: https://www.timmwangi.com/tafsiri/privacy
+**Privacy Policy URL**: https://gist.github.com/bytemel/658f63d81a7a6c8838bfbf12b58352ad (stopgap; switch to https://www.timmwangi.com/tafsiri/privacy once Vercel deploys tim.p 49710ba)
 
 Source text: `store/privacy-policy.md`.
 
