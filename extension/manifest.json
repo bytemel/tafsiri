@@ -3,7 +3,7 @@
   "name": "Tafsiri: live meeting translation",
   "short_name": "Tafsiri",
   "version": "0.2.0",
-  "description": "Free live translation for Google Meet, Teams and Zoom on the web. Hears the meeting (or reads its captions) and shows translated subtitles in a floating window. Runs on your computer.",
+  "description": "Free live translation for Google Meet, Teams and Zoom on the web. Hears the meeting and shows translated subtitles you can move.",
   "minimum_chrome_version": "138",
   "permissions": [
     "storage",

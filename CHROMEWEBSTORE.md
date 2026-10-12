@@ -11,7 +11,7 @@ Markdown), so paste the description as is.
 
 Tafsiri: live meeting translation
 
-**Short Description** (manifest description, 129 characters)
+**Short Description** (same as the manifest description, 128 characters; the store limit is 132)
 
 Free live translation for Google Meet, Teams and Zoom on the web. Hears the meeting and shows translated subtitles you can move.
 
