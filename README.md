@@ -11,8 +11,8 @@ on the web, Zoom on the web. It does not work with the Zoom or Teams desktop app
 ## Two ways it gets the speech
 
 - **Hear audio** (default where available): captures the meeting tab's sound. Needs Gemini Nano, the AI model
-  built into Chrome, which runs on computers with enough memory and disk (it was available on Tim's Mac on
-  2026-10-12). Detects the spoken language by itself. Subtitles trail speech by about 5 to 8 seconds.
+  built into Chrome, which runs on computers with enough memory and disk (tested on a MacBook in
+  October 2026). Detects the spoken language by itself. Subtitles trail speech by about 5 to 8 seconds.
 - **Read captions**: reads the meeting's own captions (turn on CC in the call). For computers without Gemini Nano.
 
 ## Languages
@@ -75,4 +75,4 @@ tick Original to show them for every line. A and A change the text size, Copy co
 ## Sound
 
 While Tafsiri hears a tab, Chrome routes that tab's sound through Tafsiri, which plays it on your default output. If you picked a
-headset inside the meeting app but your Mac's default output is the speakers, set the Mac's output to the headset to avoid echo.
+headset inside the meeting app but your computer's default output is the speakers, set the default output to the headset to avoid echo.
