@@ -26,6 +26,19 @@ test('speech separated by pauses becomes one segment per phrase', () => {
   assert.ok(segs[1].ms > 1900 && segs[1].ms < 2700, `second was ${segs[1].ms} ms`);
 });
 
+test('a soft voice is still heard (it must not be learned as background noise)', () => {
+  // RMS about 0.02, below the old starting threshold of 0.03.
+  const segs = run([quiet(1000), tone(1500, 0.028), quiet(1000), tone(1500, 0.028), quiet(1000)]);
+  assert.equal(segs.length, 2);
+});
+
+test('a steady background hum is not heard as speech for long', () => {
+  const hum = (ms) => Float32Array.from({ length: (RATE * ms) / 1000 }, () => (Math.random() - 0.5) * 0.02);
+  const segs = run([hum(60000)]);
+  const total = segs.reduce((n, s) => n + s.ms, 0);
+  assert.ok(total < 30000, `treated ${Math.round(total)} ms of 60000 ms hum as speech`);
+});
+
 test('silence and short clicks produce nothing', () => {
   assert.equal(run([quiet(3000)]).length, 0);
   assert.equal(run([quiet(1000), tone(100), quiet(1000)]).length, 0);

@@ -2,7 +2,7 @@
 // resize it from the corner, minimise it, or pop it out into an always-on-top picture-in-picture
 // window. Speech comes from the tab's audio (heard by Gemini Nano in the offscreen listener) or from
 // the meeting's captions (captions.js). Translation uses Chrome's on-device Translator API, and
-// Gemini Nano for languages the translator lacks, such as Swahili.
+// Gemini Nano for languages the translator lacks where Chrome lets Nano write them.
 (() => {
   if (typeof window.__tafsiriOverlayStop === 'function') window.__tafsiriOverlayStop();
 
@@ -13,8 +13,12 @@
 
   // Chrome's on-device translator supported these when checked on 2026-10-12 (Chrome 154).
   const LANGS = ['ar', 'bg', 'bn', 'cs', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', 'he', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'kn', 'ko', 'lt', 'mr', 'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sk', 'sl', 'sv', 'ta', 'te', 'th', 'tr', 'uk', 'vi', 'zh', 'zh-Hant'];
-  // It lacked these; Gemini Nano translates them where the computer has it (quality varies).
+  // It lacked these. Gemini Nano translated them in Chrome 154; Chrome 155 (2026-10-26) refuses to
+  // write them, so each is offered only where LanguageModel.availability says it can.
   const NANO_LANGS = ['sw', 'am', 'ha', 'yo', 'ig', 'zu', 'xh', 'so', 'rw', 'lg', 'af', 'fa', 'ur', 'ms', 'fil'];
+  // Spoken languages Gemini Nano hears as audio (same list as lib/listener.js).
+  const HEARD = ['en', 'es', 'de', 'fr', 'ja'];
+  const heardNames = () => HEARD.map(nameOf).join(', ').replace(/, ([^,]*)$/, ' and $1');
   const SIZES = [14, 15, 17, 19, 22, 26];
   const CHUNK_CHARS = 170;
   const MIN_W = 280;
@@ -178,6 +182,9 @@
 
   // Gemini Nano, Chrome's on-device model: hears audio and translates languages the translator lacks.
   const nano = { audio: 'unavailable', text: 'unavailable' };
+  const nanoOut = new Set(); // NANO_LANGS that Gemini Nano can write on this computer
+  const nanoPairs = new Map(); // "src>tgt" -> Promise<LanguageModel session>
+  let audioStats = null; // { heard, written, dropped } from the listener
   let nanoBase = null;
   let nanoLoading = null;
 
@@ -347,12 +354,23 @@
   // ---------- settings ----------
 
   function fillSelects() {
-    const codes = [...LANGS, ...(nanoTextOk() ? NANO_LANGS : [])].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    const codes = [...LANGS, ...NANO_LANGS.filter((l) => nanoOut.has(l))].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
     ui.from.replaceChildren(new Option('Auto detect', 'auto'));
     ui.to.replaceChildren();
     for (const code of codes) {
       ui.from.append(new Option(nameOf(code), code));
       ui.to.append(new Option(nameOf(code), code));
+    }
+    limitSpoken();
+  }
+
+  // Hearing audio, Gemini Nano only understands a few spoken languages; grey out the rest.
+  function limitSpoken() {
+    const audio = mode() === 'audio';
+    for (const o of ui.from.options) o.disabled = audio && o.value !== 'auto' && !HEARD.includes(o.value.split('-')[0]);
+    if (audio && settings.from !== 'auto' && !HEARD.includes(settings.from.split('-')[0])) {
+      ui.from.value = settings.from = 'auto';
+      saveSettings();
     }
   }
 
@@ -426,7 +444,8 @@
     // Ask for audio input too where the computer supports it: this is also what downloads the
     // audio part of the model, and it must happen inside the Start click.
     nanoLoading = LanguageModel.create({
-      ...(nanoAudioOk() ? { expectedInputs: [{ type: 'audio' }, { type: 'text' }] } : {}),
+      ...(nanoAudioOk() ? { expectedInputs: [{ type: 'audio', languages: HEARD }, { type: 'text', languages: ['en'] }] } : {}),
+      expectedOutputs: [{ type: 'text', languages: ['en'] }],
       temperature: 0.2,
       topK: 3,
       monitor(m) {
@@ -446,9 +465,29 @@
     return nanoLoading;
   }
 
+  // Chrome now wants every Gemini Nano session to say which languages it reads and writes.
+  async function nanoPairOk(src, tgt) {
+    if (!nanoTextOk()) return false;
+    try {
+      const a = await LanguageModel.availability({ expectedInputs: [{ type: 'text', languages: [src] }], expectedOutputs: [{ type: 'text', languages: [tgt] }] });
+      return a !== 'unavailable';
+    } catch {
+      return false;
+    }
+  }
+
+  function nanoPair(src, tgt) {
+    const key = pairKey(src, tgt);
+    if (!nanoPairs.has(key)) {
+      const p = LanguageModel.create({ expectedInputs: [{ type: 'text', languages: [src] }], expectedOutputs: [{ type: 'text', languages: [tgt] }], temperature: 0.2, topK: 3 });
+      p.catch(() => nanoPairs.delete(key));
+      nanoPairs.set(key, p);
+    }
+    return nanoPairs.get(key);
+  }
+
   async function nanoTranslate(text, src, tgt) {
-    const base = await loadNano();
-    const session = await base.clone();
+    const session = await (await nanoPair(src, tgt)).clone();
     try {
       const hint = src === 'sw' || tgt === 'sw' ? ` ${SWAHILI_TIME}` : '';
       const raw = await session.prompt(
@@ -471,13 +510,13 @@
       } catch (e) {
         // A language heard mid-meeting may need a pack download, which needs a click. Keep
         // translating with Gemini Nano meanwhile and offer the faster download.
-        if (e.code === 'needs-click' && nanoTextOk()) {
+        if (e.code === 'needs-click' && (await nanoPairOk(src, tgt))) {
           showDownload(e.pair, `Translating ${nameOf(src)} with Gemini Nano for now. Download the ${nameOf(src)} pack for faster translation.`, 'info');
           return { kind: 'nano' };
         }
         if (e.code !== 'unsupported') throw e;
       }
-      if (nanoTextOk()) return { kind: 'nano' };
+      if (await nanoPairOk(src, tgt)) return { kind: 'nano' };
       throw Object.assign(new Error(`Chrome can't translate ${nameOf(src)} into ${nameOf(tgt)} on this computer.`), { code: 'unsupported' });
     })();
     engines.set(key, p);
@@ -642,10 +681,16 @@
       who.textContent = first ? turn.speaker || '' : '';
       lang.textContent = first && turn.srcLabel ? `${turn.speaker ? ' · ' : ''}${turn.srcLabel}` : '';
       meta.hidden = !first || (!turn.speaker && !turn.srcLabel);
-      tr.textContent = c.translation ?? c.text;
-      tr.classList.toggle('pending', c.translation == null);
+      // The translation is the line people read. The speaker's own words stay a small grey line
+      // under it, shown while the translation is on its way, or with Original ticked.
+      const waiting = c.translation == null;
+      tr.textContent = waiting ? '' : c.translation;
+      tr.classList.toggle('pending', waiting);
+      tr.hidden = waiting && !!c.note;
       orig.textContent = c.text;
-      orig.hidden = c.translation == null || c.translation === c.text;
+      orig.dataset.lang = (turn.heardLang || turn.lang || '').split('-')[0].toUpperCase();
+      orig.hidden = !waiting && c.translation === c.text;
+      c.el.classList.toggle('waiting', waiting);
       note.textContent = c.note || '';
       note.hidden = !c.note;
       c.el.classList.toggle('live', !turn.final && i === turn.chunks.length - 1);
@@ -702,15 +747,23 @@
         off: [running ? 'Not listening' : 'Ready', running ? 'warn' : ''],
       };
       [text, tone] = map[audioState] || map.off;
+      ui.status.title = audioState === 'listening' && audioStats ? `Heard ${audioStats.heard}, written ${audioStats.written}, left out ${audioStats.dropped}` : '';
       if (audioState === 'waiting-click') {
         title = 'One click to let Tafsiri hear this tab';
         steps = ["Click the Tafsiri icon in Chrome's toolbar (pin it from the puzzle-piece menu), or press Alt+Shift+T."];
       } else if (audioState === 'listening') {
         title = 'Listening';
         steps = ['Translations appear a few seconds after someone speaks.'];
+        // Proof of life, so "nothing happens" can be told apart from "nobody spoke".
+        const st = audioStats;
+        if (st && st.heard) {
+          let line = `Heard ${st.heard} ${st.heard === 1 ? 'bit' : 'bits'} of speech, ${st.written} written down so far.`;
+          if (st.dropped) line += ` ${st.dropped} left out because the words did not fit the sound.`;
+          steps.push(line);
+        } else steps.push('No speech heard yet.');
       } else {
         title = 'Hear the meeting, translated';
-        steps = ['Pick your languages and press Start translating.', 'Tafsiri listens to this tab, so captions are not needed.'];
+        steps = ['Pick your languages and press Start translating.', `Tafsiri listens to this tab, so captions are not needed. It understands ${heardNames()} speech.`];
       }
     } else {
       const { state, platform } = readerStatus;
@@ -754,7 +807,8 @@
       if ('Translator' in self) a = await Translator.availability({ sourceLanguage: settings.from, targetLanguage: settings.to });
     } catch {}
     if (gen !== pairCheck) return; // the user picked another pair meanwhile
-    const ok = a !== 'unavailable' || nanoTextOk();
+    const ok = a !== 'unavailable' || (await nanoPairOk(settings.from, settings.to));
+    if (gen !== pairCheck) return;
     ui.start.disabled = !ok;
     if (!ok) setNotice(`Chrome can't translate ${nameOf(settings.from)} into ${nameOf(settings.to)} on this computer. Pick another pair.`);
     else if (a === 'unavailable') setNotice(`Gemini Nano translates ${nameOf(settings.from)} to ${nameOf(settings.to)}. It is a little slower and quality varies.`, 'info');
@@ -805,18 +859,6 @@
   function onAudioLine(line) {
     if (!running || mode() !== 'audio' || stale(line)) return;
     const lang = line.lang || null;
-    // The listener already translated this line: show it as it is, one line per block.
-    if (line.translation != null) {
-      const turn = newTurn(`a${++audioSeq}`, { heardLang: lang, text: line.text });
-      const same = lang && sameLang(lang, settings.to);
-      turn.chunks = [{ text: line.text, translation: same || !line.translation ? line.text : line.translation, done: line.text, note: '', el: null }];
-      turn.srcLabel = settings.from === 'auto' && lang ? nameOf(lang) : '';
-      turn.endMs = line.endMs;
-      audioTurn = turn;
-      paint(turn);
-      quietLater(turn);
-      return;
-    }
     const joins = audioTurn && turns.has(audioTurn.id) && line.startMs - audioTurn.endMs < 1500 && audioTurn.heardLang === lang && audioTurn.text.length < 700;
     if (joins) {
       // A sentence cut in two by a pause: "the launch" + "Plan for..." reads "the launch plan for...".
@@ -857,23 +899,20 @@
         nano.audio = 'unavailable';
         setNotice("Gemini Nano is not available on this computer, so Tafsiri can't hear audio here. Switched to reading captions.");
         setMode('captions');
-      } else if (msg.code === 'nano-not-ready') setNotice('Gemini Nano is still getting ready on this computer. Try again in a few minutes, or read captions for now.');
+      } else if (msg.code === 'nano-stuck') setNotice('Gemini Nano stopped answering. Close other tabs that use Chrome AI (or restart Chrome), then press Start translating again.');
+      else if (msg.code === 'nano-not-ready') setNotice('Gemini Nano is still getting ready on this computer. Try again in a few minutes, or read captions for now.');
       else setNotice(`Could not hear this tab: ${msg.message || 'unknown error'}`);
     }
     renderStatus();
   }
 
-  // For targets Chrome's translator lacks, the listener translates while it transcribes.
-  const listenerTranslates = () => NANO_LANGS.includes(settings.to);
-  const audioOptions = () => ({
-    spokenHint: settings.from === 'auto' ? '' : nameOf(settings.from),
-    translateTo: listenerTranslates() ? nameOf(settings.to) : '',
-  });
+  const audioOptions = () => ({ spokenHint: settings.from === 'auto' ? '' : nameOf(settings.from) });
 
   async function requestAudio() {
     audioState = 'starting';
     renderStatus();
     const gen = ++audioGen;
+    audioStats = null;
     let res;
     try {
       res = await chrome.runtime.sendMessage({ type: 'audio-start', gen, ...audioOptions() });
@@ -920,7 +959,7 @@
 
   // Load what this language choice needs. Call inside a click: Chrome may need to download it.
   function prepareEngines() {
-    const needNano = mode() === 'audio' || NANO_LANGS.includes(settings.to) || NANO_LANGS.includes(settings.from);
+    const needNano = mode() === 'audio';
     if (nanoTextOk() && (nano.text === 'available' || needNano)) loadNano().catch(() => {});
 
     if (mode() === 'captions' && settings.from === 'auto' && !detector && !detectorLoading) {
@@ -967,6 +1006,7 @@
     if (wasRunning) pause();
     settings.mode = m;
     audioTurn = null;
+    limitSpoken();
     saveSettings();
     applyView();
     renderStatus();
@@ -1096,6 +1136,13 @@
     if (!msg) return;
     if (msg.type === 'audio-line') return onAudioLine(msg);
     if (msg.type === 'audio-state') return onAudioState(msg);
+    if (msg.type === 'audio-stats') {
+      if (!stale(msg)) {
+        audioStats = msg;
+        renderStatus();
+      }
+      return;
+    }
     if (msg.type === 'open') return show({ minimised: false });
     // Toolbar icon. If Tafsiri was waiting for this click to hear the tab, open and listen.
     // Otherwise: expand a minimised bar, hide an open window, show a hidden one.
@@ -1135,8 +1182,11 @@
   async function probeNano() {
     if (!('LanguageModel' in self)) return;
     try {
-      nano.text = await LanguageModel.availability();
-      nano.audio = await LanguageModel.availability({ expectedInputs: [{ type: 'audio' }] });
+      nano.text = await LanguageModel.availability({ expectedOutputs: [{ type: 'text', languages: ['en'] }] });
+      nano.audio = await LanguageModel.availability({ expectedInputs: [{ type: 'audio', languages: HEARD }], expectedOutputs: [{ type: 'text', languages: HEARD }] });
+      const outs = await Promise.all(NANO_LANGS.map((l) =>
+        LanguageModel.availability({ expectedInputs: [{ type: 'text', languages: ['en'] }], expectedOutputs: [{ type: 'text', languages: [l] }] }).catch(() => 'unavailable')));
+      NANO_LANGS.forEach((l, i) => outs[i] !== 'unavailable' && nanoOut.add(l));
     } catch {}
   }
 

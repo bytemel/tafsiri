@@ -7,7 +7,7 @@ function report(state, msg) {
   chrome.runtime.sendMessage({ ...msg, target: 'background', tabId: state.tabId, gen: state.gen }).catch(() => {});
 }
 
-async function start({ streamId, tabId, gen, spokenHint, translateTo }) {
+async function start({ streamId, tabId, gen, spokenHint }) {
   stop();
   const st = { tabId, gen, listener: null, stream: null };
   current = st;
@@ -20,9 +20,9 @@ async function start({ streamId, tabId, gen, spokenHint, translateTo }) {
     const listener = await TafsiriListener.startListening(st.stream, {
       workletUrl: chrome.runtime.getURL('audio-worklet.js'),
       spokenHint,
-      translateTo,
       onLine: (line) => report(st, { type: 'audio-line', ...line }),
       onState: (s) => report(st, { type: 'audio-state', ...s }),
+      onStats: (s) => report(st, { type: 'audio-stats', ...s }),
     });
     // A stop that arrived while the model was loading wins.
     if (current !== st) {
@@ -64,7 +64,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const live = mine && !!current.listener;
     if (live) {
       if (msg.gen != null) current.gen = msg.gen;
-      current.listener.setOptions({ spokenHint: msg.spokenHint, translateTo: msg.translateTo });
+      current.listener.setOptions({ spokenHint: msg.spokenHint });
       report(current, { type: 'audio-state', state: 'listening' });
     }
     sendResponse(live);

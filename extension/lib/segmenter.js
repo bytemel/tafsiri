@@ -48,7 +48,10 @@
   } = {}) {
     const msPerFrame = (FRAME / OUT_RATE) * 1000;
     let pending = new Float32Array(0);
-    let noise = 0.01;
+    // Meeting audio arrives already noise-suppressed, so the room starts near silent. Starting
+    // high, or learning from every quiet frame, taught the floor a soft voice and then never
+    // heard it again (seen on a live Meet call, 2026-10-26).
+    let noise = 0.002;
     let speaking = false;
     let frames = []; // { data, voiced }
     let preroll = [];
@@ -56,7 +59,7 @@
     let silentRun = 0;
     let clock = 0; // ms of audio seen
 
-    const threshold = () => Math.max(0.006, noise * 3);
+    const threshold = () => Math.max(0.004, noise * 3);
 
     function emit(list) {
       const voiced = list.filter((f) => f.voiced).length * msPerFrame;
@@ -71,8 +74,10 @@
       const level = rms(data);
       const voiced = level > threshold();
       if (!speaking) {
-        // Track the room's background level while nobody talks.
-        noise = Math.max(0.001, noise * 0.97 + Math.min(level, noise * 4) * 0.03);
+        // Track the room's background level while nobody talks: only frames near the floor teach
+        // it; louder ones (a voice) just let it creep up slowly, in case the background got louder.
+        if (level < noise * 2) noise = Math.max(0.001, noise * 0.97 + level * 0.03);
+        else noise = Math.min(noise * 1.002, 0.05);
         preroll.push({ data, voiced });
         if (preroll.length > prerollMs / msPerFrame + startMs / msPerFrame) preroll.shift();
         voicedRun = voiced ? voicedRun + 1 : 0;

@@ -17,17 +17,25 @@ on the web, Zoom on the web. It does not work with the Zoom or Teams desktop app
 
 ## Languages
 
-Chrome's translator (fast, good quality) supported these on 2026-10-12: Arabic, Bengali, Bulgarian, Chinese
-(Simplified and Traditional), Croatian, Czech, Danish, Dutch, English, Finnish, French, German, Greek, Hebrew, Hindi,
-Hungarian, Indonesian, Italian, Japanese, Kannada, Korean, Lithuanian, Marathi, Norwegian, Polish, Portuguese,
-Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Tamil, Telugu, Thai, Turkish, Ukrainian, Vietnamese.
+Hear audio understands English, Spanish, German, French and Japanese speech: those are the spoken languages
+Gemini Nano accepts in Chrome 155 (checked 2026-10-26).
 
-Where Gemini Nano is available it also covers Swahili, Amharic, Hausa, Yoruba, Igbo, Zulu, Xhosa, Somali,
-Kinyarwanda, Luganda, Afrikaans, Persian, Urdu, Malay and Filipino. Quality there is rougher: tested on
-2026-10-12, Swahili speech was transcribed correctly, Swahili to English read well, and English to Swahili was
-understandable but had wrong words. Swahili clock time ("saa nne asubuhi" = 10 a.m.) is converted.
+Translation goes into any language Chrome's translator has (fast, good quality). On 2026-10-12 that was: Arabic,
+Bengali, Bulgarian, Chinese (Simplified and Traditional), Croatian, Czech, Danish, Dutch, English, Finnish, French,
+German, Greek, Hebrew, Hindi, Hungarian, Indonesian, Italian, Japanese, Kannada, Korean, Lithuanian, Marathi,
+Norwegian, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Tamil, Telugu, Thai,
+Turkish, Ukrainian, Vietnamese.
 
-## Install (free, no Web Store)
+Swahili, Kinyarwanda, Amharic and other African languages: Chrome 154 let Gemini Nano translate them; Chrome 155
+refuses, and Chrome's translator does not have them. Tafsiri offers them again by itself on any Chrome that
+allows them.
+
+## Install
+
+From the Chrome Web Store:
+https://chromewebstore.google.com/detail/tafsiri-live-meeting-tran/jabmecmcfkdnnkkiehnfokifbbfbbkbd
+
+Or unpacked, for development:
 
 1. Open `chrome://extensions` in Chrome and turn on **Developer mode** (top right).
 2. Click **Load unpacked** and pick the `extension` folder (or the unzipped release).
@@ -40,8 +48,10 @@ understandable but had wrong words. Swahili clock time ("saa nne asubuhi" = 10 a
    this click, once per tab.
 3. Pick the language to translate into and press **Start translating**.
 
-The window shows the newest two lines large and older lines small. Tap a line to see the speaker's own words, or
-tick Original to show them for every line. A and A change the text size, Copy copies the conversation, Clear empties it.
+The translation is the big line. The speaker's own words appear under it, small and grey with a language tag,
+while the translation is on its way; after that, tap a line to see them again, or tick Original to keep them for
+every line. While nothing is written yet, the window says how many bits of speech it heard, so you can tell
+"nobody spoke" from "something is wrong". A and A change the text size, Copy copies the conversation, Clear empties it.
 
 ## How it works
 
@@ -64,13 +74,13 @@ tick Original to show them for every line. A and A change the text size, Copy co
   `CHROMEWEBSTORE.md`; images in `store/`.
 - After editing extension files, press reload on the Tafsiri card in `chrome://extensions` and reload the meeting tab.
 
-## Publish to the Chrome Web Store
+## Release an update
 
-1. Register at https://chrome.google.com/webstore/devconsole (one-time $5 fee, your Google account).
-2. New item: upload the release zip (`tafsiri-<version>.zip`, the `extension` folder only).
-3. Fill the listing, privacy and permission fields from `CHROMEWEBSTORE.md`; upload `extension/icons/128.png`,
-   `store/screenshot-*.png` and `store/promo-small.png`. Privacy policy: https://www.timmwangi.com/tafsiri/privacy
-4. Submit for review. Audio capture and meeting-site access usually mean a closer review (days to a few weeks).
+1. Bump `version` in `extension/manifest.json`.
+2. Zip the `extension` folder only: `cd extension && zip -r ../tafsiri-<version>.zip . -x '.*'`.
+3. Upload it at https://chrome.google.com/webstore/devconsole (Tafsiri, Package, Upload new package) and submit.
+   Store copy, permission reasons and privacy answers live in `CHROMEWEBSTORE.md`.
+4. Attach the same zip to a GitHub release tagged `v<version>`.
 
 ## Sound
 

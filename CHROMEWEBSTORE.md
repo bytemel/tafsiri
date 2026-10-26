@@ -21,8 +21,9 @@ Tafsiri shows live translated subtitles for the online meeting you are in, in a 
 
 What it does
 Hears the meeting tab and writes down what each person says, in the language they speak, then translates it into your language a few seconds later.
-Detects the spoken language by itself, so a meeting can switch between English, French, Swahili and more.
-Translates into about 50 languages, including Swahili, Amharic, Hausa, Yoruba, Zulu and Somali on computers that support Chrome's built-in AI.
+Understands English, Spanish, German, French and Japanese speech, and detects which one is spoken by itself.
+Translates into about 40 languages with Chrome's built-in translator.
+The translation is the big line; the speaker's own words sit under it, small and grey, so the two never look alike.
 Shows the newest lines large and keeps older lines small, so long speeches stay readable.
 Can read the meeting's own captions instead, on computers without Chrome's built-in AI.
 The window can be dragged, resized, shrunk to a slim bar, or popped out so it stays on top while you share your screen.
@@ -124,7 +125,8 @@ Source text: `store/privacy-policy.md`.
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
-| 0.2.0 | 2026-10-12 | Hears the meeting audio (no captions needed) with automatic language detection; Swahili and other languages through Chrome's built-in AI; subtitle view with the newest lines large. | Draft |
+| 0.3.0 | 2026-10-26 | Fixes the live audio mode on real calls: soft voices were never heard, Gemini Nano could hang silently, and it could invent lines. Declares the languages Chrome 155 now requires; drops Swahili and other languages Chrome no longer writes. Translation is now the main line, the original a small grey line under it. Shows how much speech it heard. | Ready to upload |
+| 0.2.0 | 2026-10-12 | Hears the meeting audio (no captions needed) with automatic language detection; Swahili and other languages through Chrome's built-in AI; subtitle view with the newest lines large. | Live 2026-10-13 |
 | 0.1.0 | 2026-10-12 | First build: reads meeting captions, floating window, picture in picture. Not submitted. | Not submitted |
 
 ## Review Notes

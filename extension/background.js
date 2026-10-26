@@ -42,12 +42,12 @@ const toOffscreen = (msg) => chrome.runtime.sendMessage({ target: 'offscreen', .
 const toTab = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 
 async function startAudio(tabId, opts = {}) {
-  const { spokenHint = '', translateTo = '', gen = 0 } = opts;
+  const { spokenHint = '', gen = 0 } = opts;
   try {
     const active = await getActive();
     // Already hearing this tab: just apply the new options and say so again.
     if (active && active.tabId === tabId && (await hasOffscreen())) {
-      if (await toOffscreen({ type: 'update', tabId, gen, spokenHint, translateTo })) {
+      if (await toOffscreen({ type: 'update', tabId, gen, spokenHint })) {
         await setActive({ ...active, gen });
         return { ok: true };
       }
@@ -76,7 +76,7 @@ async function startAudio(tabId, opts = {}) {
     await ensureOffscreen();
     // The new document may still be loading its scripts; retry briefly until it answers.
     for (let i = 0; i < 20; i++) {
-      if (await toOffscreen({ type: 'start', streamId, tabId, gen, spokenHint, translateTo })) return { ok: true };
+      if (await toOffscreen({ type: 'start', streamId, tabId, gen, spokenHint })) return { ok: true };
       await new Promise((r) => setTimeout(r, 100));
     }
     await setActive(null);
@@ -131,7 +131,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'audio-update') {
     (async () => {
       const active = await getActive();
-      if (active && active.tabId === tabId) await toOffscreen({ type: 'update', tabId, spokenHint: msg.spokenHint, translateTo: msg.translateTo });
+      if (active && active.tabId === tabId) await toOffscreen({ type: 'update', tabId, spokenHint: msg.spokenHint });
     })();
     return;
   }

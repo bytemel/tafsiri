@@ -217,35 +217,68 @@ globalThis.TafsiriCSS = `
 
 .turns { list-style: none; margin: 0; padding: 0; }
 
-/* Subtitle view: one short chunk per line. The newest two are full size; older ones step back. */
-.chunk { padding: 6px 0 6px 10px; border-left: 3px solid transparent; cursor: default; }
+/* Subtitle view: one short chunk per line. The translation is the line people read: large and
+   in full colour. The speaker's own words sit under it, small and grey with a language tag, so
+   the two never look alike. The newest two lines are full size; older ones step back. */
+.chunk { padding: 6px 0; cursor: default; }
 .chunk .meta:not([hidden]) { margin-top: 8px; }
 .chunk:first-child .meta { margin-top: 0; }
-.chunk.live { border-left-color: var(--accent); }
 .meta { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
 .meta .lang { font-weight: 400; }
 .tr {
   margin: 0;
   font-size: calc(var(--tr-size) * 0.82);
   line-height: 1.4;
-  color: var(--muted);
+  color: var(--text);
+  opacity: 0.72;
   overflow-wrap: anywhere;
 }
-.chunk.recent .tr { font-size: var(--tr-size); color: var(--text); font-weight: 500; }
-.tr.pending, .chunk.recent .tr.pending { color: var(--muted); font-weight: 400; font-style: italic; }
+.chunk.recent .tr { font-size: var(--tr-size); opacity: 1; font-weight: 600; }
+/* Still translating: three soft dots instead of the untranslated words. */
+.tr.pending { min-height: 1.4em; opacity: 1; }
+.tr.pending::before { content: "\\2022\\2022\\2022"; letter-spacing: 3px; color: var(--muted); animation: tafsiri-wait 1.2s ease-in-out infinite; }
+@keyframes tafsiri-wait { 50% { opacity: 0.3; } }
+/* The line still being spoken gets a small live dot, not a coloured bar. */
+.chunk.live .tr::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+  animation: tafsiri-wait 1.2s ease-in-out infinite;
+}
 .orig {
-  margin: 2px 0 0;
+  margin: 3px 0 0;
   font-size: 12.5px;
+  line-height: 1.4;
+  font-weight: 400;
   color: var(--muted);
   overflow-wrap: anywhere;
   display: -webkit-box;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.orig[data-lang]:not([data-lang=""])::before {
+  content: attr(data-lang);
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 15px;
+  vertical-align: 1px;
+}
 .chunk.expanded .orig { display: block; -webkit-line-clamp: unset; }
 .note { margin: 3px 0 0; font-size: 12px; color: var(--warn); }
-.win:not(.show-original) .chunk:not(.expanded) .orig { display: none; }
+.win:not(.show-original) .chunk:not(.expanded):not(.waiting) .orig { display: none; }
+@media (prefers-reduced-motion: reduce) { .tr.pending::before, .chunk.live .tr::after { animation: none; } }
 
 .jump {
   position: absolute;

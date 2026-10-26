@@ -65,10 +65,11 @@
   </script>
   <script>
     // Audio mode, dev only: play the test clip into the real listener without using the speakers.
+    // ?clip=en.wav picks another file from dev/local/.
     let devListener = null;
     window.__devAudioStart = async (msg, dispatch) => {
       const ctx = new AudioContext();
-      const buf = await ctx.decodeAudioData(await (await fetch('local/meeting.wav')).arrayBuffer());
+      const buf = await ctx.decodeAudioData(await (await fetch(`local/${new URLSearchParams(location.search).get('clip') || 'meeting.wav'}`)).arrayBuffer());
       const src = ctx.createBufferSource();
       src.buffer = buf;
       const dest = ctx.createMediaStreamDestination();
@@ -79,10 +80,10 @@
         devListener = await TafsiriListener.startListening(dest.stream, {
           workletUrl: '../extension/audio-worklet.js',
           spokenHint: msg.spokenHint,
-          translateTo: msg.translateTo,
           playback: false,
           onLine: (line) => dispatch({ type: 'audio-line', ...line }),
           onState: (s) => dispatch({ type: 'audio-state', ...s }),
+          onStats: (s) => dispatch({ type: 'audio-stats', ...s }),
         });
         return { ok: true };
       } catch (e) {

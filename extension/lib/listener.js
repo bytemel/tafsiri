@@ -1,8 +1,17 @@
 // The audio listener: takes a MediaStream (the meeting tab's sound), keeps it audible, cuts it at
 // pauses and asks Gemini Nano (Chrome's on-device model) what was said and in which language.
-// Runs in the offscreen document; the dev preview runs it on a normal page.
+// Translation happens afterwards in the overlay. Runs in the offscreen document; the dev preview
+// runs it on a normal page.
 (function (root) {
   const { createSegmenter, OUT_RATE } = root.TafsiriSegmenter;
+
+  // The spoken languages Gemini Nano accepts as audio. Chrome 155 (checked 2026-10-26) refuses
+  // the rest, Swahili included; asking for them makes it guess.
+  const HEARD = ['en', 'es', 'de', 'fr', 'ja'];
+  const MODEL_OPTIONS = {
+    expectedInputs: [{ type: 'audio', languages: HEARD }, { type: 'text', languages: ['en'] }],
+    expectedOutputs: [{ type: 'text', languages: HEARD }],
+  };
 
   const SCHEMA = {
     type: 'object',
@@ -13,40 +22,52 @@
     required: ['language', 'transcript'],
   };
 
-  const SCHEMA_WITH_TRANSLATION = {
-    type: 'object',
-    properties: { ...SCHEMA.properties, translation: { type: 'string' } },
-    required: ['language', 'transcript', 'translation'],
-  };
-
-  // Swahili counts clock hours from sunrise.
-  const SWAHILI_TIME = 'Swahili clock time starts at 6: "saa moja asubuhi" is 7 a.m., "saa nne asubuhi" is 10 a.m., "saa moja jioni" is 7 p.m.';
-
   // Phrases a speech model tends to invent from noise or music.
   const NOISE = /^(\W*|\[.*\]|\(.*\)|thank you\.?|thanks for watching\.?|music|applause)$/i;
 
-  // translateTo: a language name. When set, Nano also translates each line in the same call,
-  // which halves the work for languages Chrome's translator lacks (such as Swahili).
-  async function startListening(stream, { workletUrl, spokenHint, translateTo, onLine, onState, playback = true }) {
-    const opts = { spokenHint, translateTo };
+  // Gemini Nano is shared by the whole browser and sometimes stops answering. Never wait forever.
+  function withTimeout(promise, ms, controller) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        if (controller) controller.abort();
+        reject(Object.assign(new Error('Gemini Nano did not answer in time.'), { code: 'timeout' }));
+      }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  // A speech model fed noise or music can invent a whole paragraph. Real speech fits its length:
+  // about 3 words a second (CJK about 8 characters), so anything far past that was made up.
+  function plausible(text, voicedMs) {
+    const secs = Math.max(voicedMs, 300) / 1000;
+    const cjk = (text.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+    if (cjk) return cjk <= secs * 12 + 8;
+    return text.split(/\s+/).filter(Boolean).length <= secs * 4.5 + 4;
+  }
+
+  async function startListening(stream, { workletUrl, spokenHint, onLine, onState, onStats, playback = true }) {
+    const opts = { spokenHint };
     if (!('LanguageModel' in root)) throw Object.assign(new Error('Gemini Nano is not available in this Chrome.'), { code: 'no-nano' });
-    const availability = await LanguageModel.availability({ expectedInputs: [{ type: 'audio' }] });
+    const availability = await LanguageModel.availability(MODEL_OPTIONS);
     if (availability !== 'available') {
       throw Object.assign(new Error(`Gemini Nano is ${availability} on this computer.`), { code: availability === 'unavailable' ? 'no-nano' : 'nano-not-ready' });
     }
     // Start hearing right away; speech is queued while the model loads, so the first words are kept.
-    const baseP = LanguageModel.create({ expectedInputs: [{ type: 'audio' }], temperature: 0.1, topK: 1 });
+    const baseP = withTimeout(LanguageModel.create({ ...MODEL_OPTIONS, temperature: 0.1, topK: 1 }), 60000);
     baseP.catch((e) => {
-      onState({ state: 'error', code: 'nano-not-ready', message: String((e && e.message) || e) });
-      stop('Gemini Nano could not load on this computer. Try Read captions instead.');
+      const stuck = e && e.code === 'timeout';
+      onState({ state: 'error', code: stuck ? 'nano-stuck' : 'nano-not-ready', message: String((e && e.message) || e) });
+      stop(stuck ? 'Gemini Nano is busy or stuck. Close other tabs that use Chrome AI, or restart Chrome.' : 'Gemini Nano could not load on this computer. Try Read captions instead.');
     });
     // The first prompt after loading is slow. Spend that time now, before anyone speaks.
     const warm = (async () => {
       try {
         const s = await (await baseP).clone();
         const quiet = new AudioBuffer({ length: OUT_RATE / 2, sampleRate: OUT_RATE, numberOfChannels: 1 });
+        const ac = new AbortController();
         try {
-          await s.prompt([{ role: 'user', content: [{ type: 'text', value: 'Transcribe this audio.' }, { type: 'audio', value: quiet }] }], { responseConstraint: SCHEMA });
+          await withTimeout(s.prompt([{ role: 'user', content: [{ type: 'text', value: 'Transcribe this audio.' }, { type: 'audio', value: quiet }] }], { responseConstraint: SCHEMA, signal: ac.signal }), 30000, ac);
         } finally {
           s.destroy();
         }
@@ -65,38 +86,41 @@
     let seq = 0;
     let queue = [];
     let busy = false;
+    let timeouts = 0;
     const startedAt = Date.now();
+    // What the overlay shows while nothing is written yet, so a silent failure is visible.
+    const stats = { heard: 0, written: 0, dropped: 0 };
+    const tell = () => onStats && onStats({ ...stats });
 
     async function transcribe(samples, info) {
       const audio = new AudioBuffer({ length: samples.length, sampleRate: OUT_RATE, numberOfChannels: 1 });
       audio.copyToChannel(samples, 0);
-      const { spokenHint, translateTo } = opts; // read per piece, so a language change applies at once
+      const { spokenHint } = opts; // read per piece, so a language change applies at once
       const hint = spokenHint ? ` The speech is in ${spokenHint}.` : '';
-      const also = translateTo
-        ? ` Then translate the transcript into ${translateTo}, naturally, keeping names and numbers.${/swahili/i.test(translateTo) ? ` ${SWAHILI_TIME}` : ''}`
-        : '';
       const session = await (await baseP).clone();
+      const ac = new AbortController();
       try {
-        const raw = await session.prompt(
+        // Nano runs at about 0.7x real time; four times the clip length means it is stuck.
+        const raw = await withTimeout(session.prompt(
           [{ role: 'user', content: [
-            { type: 'text', value: `Transcribe this meeting audio exactly, in the language it is spoken in (the transcript is never translated). Give the ISO 639-1 language code.${hint}${also} If there is no clear speech, return empty strings.` },
+            { type: 'text', value: `Transcribe this meeting audio word for word, in the language it is spoken in (never translate). Give the ISO 639-1 language code.${hint} Write only words you clearly hear. If there is no clear speech, return empty strings.` },
             { type: 'audio', value: audio },
           ] }],
-          { responseConstraint: translateTo ? SCHEMA_WITH_TRANSLATION : SCHEMA },
-        );
-        const { language, transcript, translation } = JSON.parse(raw);
+          { responseConstraint: SCHEMA, signal: ac.signal },
+        ), Math.max(15000, ((info.endMs - info.startMs) || 0) * 4), ac);
+        timeouts = 0;
+        const { language, transcript } = JSON.parse(raw);
         const text = (transcript || '').trim();
-        if (text && !NOISE.test(text)) {
-          onLine({
-            seg: ++seq,
-            text,
-            lang: (language || '').toLowerCase().split(/[-_]/)[0],
-            translation: translateTo ? (translation || '').trim() : null,
-            startMs: info.startMs,
-            endMs: info.endMs,
-            at: startedAt + info.endMs,
-          });
+        const lang = (language || '').toLowerCase().split(/[-_]/)[0];
+        if (!text || NOISE.test(text)) return;
+        if (!plausible(text, info.voicedMs) || (lang && !HEARD.includes(lang))) {
+          stats.dropped++;
+          tell();
+          return;
         }
+        stats.written++;
+        tell();
+        onLine({ seg: ++seq, text, lang, startMs: info.startMs, endMs: info.endMs, at: startedAt + info.endMs });
       } finally {
         session.destroy();
       }
@@ -125,12 +149,18 @@
             joined.set(p.samples, o);
             o += p.samples.length;
           }
-          item = { samples: joined, info: { startMs: parts[0].info.startMs, endMs: parts.at(-1).info.endMs } };
+          const voicedMs = parts.reduce((n, p) => n + (p.info.voicedMs || 0), 0);
+          item = { samples: joined, info: { startMs: parts[0].info.startMs, endMs: parts.at(-1).info.endMs, voicedMs } };
         }
         try {
           await transcribe(item.samples, item.info);
         } catch (e) {
-          onState({ state: 'warn', message: `Could not transcribe a moment of speech: ${e.message || e}` });
+          if (e.code === 'timeout' && ++timeouts >= 2) {
+            onState({ state: 'error', code: 'nano-stuck', message: e.message });
+            stop('Gemini Nano stopped answering. Close other tabs that use Chrome AI, or restart Chrome, then start again.');
+            break;
+          }
+          onState({ state: 'warn', message: `Could not write down a moment of speech: ${e.message || e}` });
         }
       }
       busy = false;
@@ -141,6 +171,8 @@
       maxMs: 5000,
       endSilenceMs: 500,
       onSegment: (samples, info) => {
+        stats.heard++;
+        tell();
         queue.push({ samples, info });
         drain();
       },
@@ -166,10 +198,9 @@
       stop,
       setOptions(next) {
         if ('spokenHint' in next) opts.spokenHint = next.spokenHint || '';
-        if ('translateTo' in next) opts.translateTo = next.translateTo || '';
       },
     };
   }
 
-  root.TafsiriListener = { startListening };
+  root.TafsiriListener = { startListening, HEARD, plausible };
 })(globalThis);
